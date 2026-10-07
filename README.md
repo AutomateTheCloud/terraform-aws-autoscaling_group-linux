@@ -913,7 +913,7 @@ Description: Wait for each new instance to report that its setup at boot succeed
 - `enabled` - (Optional) Defaults to `true`. When the group is created, the apply waits for a success signal from each instance in `desired_capacity` (or `min_size`) and fails if one fails or does not report in time. With weights in `instance_types`, it waits for the fewest instances that can make up that capacity: the capacity divided by the largest weight, rounded up. In a rolling update, each batch waits the same way, and a failure rolls the whole update back.
 - `timeout` - (Optional) How long to wait for each instance, as an ISO 8601 duration from `PT1M` to `PT1H`, such as `PT15M`. Defaults to `PT15M`.
 
-With `false`, the apply finishes as soon as the instances are launched, and a rolling update waits `rolling_update.pause_time` between batches.
+With `false`, the apply finishes as soon as the instances are launched, and a rolling update waits `rolling_update.pause_time` between batches. A failed setup or script is then reported only on the instance: `cloud-init status` shows `error`, and the reason is in `/var/log/cloud-init-output.log`, which reaches the `cloud-init` log group once the CloudWatch agent has started. Watch for it yourself.
 
 Type:
 

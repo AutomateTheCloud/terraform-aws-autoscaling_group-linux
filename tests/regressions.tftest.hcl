@@ -253,3 +253,25 @@ run "al2023_user_data_unchanged" {
     error_message = "Amazon Linux 2023 user data has none of the Ubuntu boot steps."
   }
 }
+
+# A log file rotated away between find and chmod failed the cleanup step, cfn-init returned
+# non-zero, and the boot skipped user_data_scripts (seen in AWS, 1 boot in 70). The step is not
+# essential: cfn-init logs its failure and carries on.
+run "log_permissions_not_fatal" {
+  command = apply
+  assert {
+    condition = (
+      local.template.Resources.LaunchTemplate.Metadata["AWS::CloudFormation::Init"].cleanup.commands["01_log_permissions"].ignoreErrors == "true" &&
+      local.template.Resources.LaunchTemplate.Metadata["AWS::CloudFormation::Init"].cleanup.commands["01_log_permissions"].command == "find /var/log -type f -perm /g+wx,o+rwx -exec chmod g-wx,o-rwx {} +"
+    )
+    error_message = "The log permissions step touches only files that need it, and its failure does not stop the setup."
+  }
+  assert {
+    condition = alltrue(flatten([
+      for name, config in local.template.Resources.LaunchTemplate.Metadata["AWS::CloudFormation::Init"] : [
+        for c in values(try(config.commands, {})) : !contains(keys(c), "ignoreErrors") if name != "cleanup"
+      ]
+    ]))
+    error_message = "Only the cleanup step may fail without stopping the setup."
+  }
+}

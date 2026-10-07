@@ -124,9 +124,15 @@ locals {
           }
         }
       }
+      # Not essential: a failure is logged in /var/log/cfn-init.log, and the setup carries on to
+      # the user_data_scripts. Agents rotate their logs while it runs, so a file can be gone by
+      # the time chmod reaches it (seen in AWS); only files that need the change are touched.
       cleanup = {
         commands = {
-          "01_log_permissions" = { command = "find /var/log -type f -exec chmod g-wx,o-rwx {} +" }
+          "01_log_permissions" = {
+            command      = "find /var/log -type f -perm /g+wx,o+rwx -exec chmod g-wx,o-rwx {} +"
+            ignoreErrors = "true"
+          }
         }
       }
     },

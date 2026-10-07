@@ -4,6 +4,16 @@ All notable changes to this module are listed here. The format follows [Keep a C
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-10-07
+
+### Fixed
+
+- A failure of the last setup step, which removes group write and other users' access from the files in `/var/log`, stopped the boot before `user_data_scripts`. An agent rotating its log while the step ran was enough: the file was gone when `chmod` reached it. The step is no longer essential: `cfn-init` logs its failure in `/var/log/cfn-init.log` and carries on, and it changes only the files that need it. Upgrading changes only the setup steps, which `cfn-hup` applies to running instances; no instance is replaced.
+
+### Changed
+
+- The `resource_signals` description says how to find a failed setup when signals are off.
+
 ## [1.0.1] - 2026-10-07
 
 ### Fixed
@@ -36,6 +46,7 @@ Initial release.
 - A `metadata` output with everything the module created.
 - Offline tests, and examples for a basic deployment, a complete one, Network and Classic Load Balancers, Spot Instances, a pinned AMI with rolling updates, and Parameter Store.
 
-[Unreleased]: https://github.com/AutomateTheCloud/terraform-aws-autoscaling_group-linux/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/AutomateTheCloud/terraform-aws-autoscaling_group-linux/compare/v1.0.2...HEAD
+[1.0.2]: https://github.com/AutomateTheCloud/terraform-aws-autoscaling_group-linux/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/AutomateTheCloud/terraform-aws-autoscaling_group-linux/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/AutomateTheCloud/terraform-aws-autoscaling_group-linux/releases/tag/v1.0.0
