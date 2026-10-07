@@ -1,0 +1,11 @@
+# Opens a pull request when a GitHub Action used in .github/workflows has a new
+# release. The actions are pinned to commit SHAs, which do not update on their own.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns: ["*"]

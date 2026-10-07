@@ -1,0 +1,37 @@
+# Generates the Requirements, Inputs and Outputs sections of README.md, here and
+# in each example, from the code. Run `terraform-docs .` after changing a variable or output; CI fails if
+# README.md is out of date.
+formatter: markdown document
+
+# Also generate the README.md of each directory in examples/.
+recursive:
+  enabled: true
+  path: examples
+  include-main: true
+
+output:
+  file: README.md
+  mode: inject
+
+sort:
+  enabled: true
+  by: required
+
+settings:
+  anchor: true
+  default: true
+  escape: false
+  hide-empty: true
+  html: false
+  indent: 3
+  lockfile: false
+  read-comments: false
+  required: true
+  sensitive: true
+  type: true
+
+sections:
+  show:
+    - requirements
+    - inputs
+    - outputs

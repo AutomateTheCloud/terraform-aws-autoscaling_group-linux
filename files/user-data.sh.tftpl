@@ -1,0 +1,61 @@
+#!/bin/bash
+# Copyright 2026 Automate the Cloud Inc.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Boot commands for the instances of the CloudFormation stack ${stack_name}, written by the
+# Terraform module AutomateTheCloud/autoscaling_group-linux/aws. The output is in
+# /var/log/cloud-init-output.log; cfn-init writes its own to /var/log/cfn-init.log.
+STACK='${stack_name}'
+REGION='${region}'
+
+%{ if os == "al2023" ~}
+CFN_BIN=/opt/aws/bin
+%{ if update_packages ~}
+dnf -y upgrade
+%{ endif ~}
+%{ else ~}
+export DEBIAN_FRONTEND=noninteractive
+APT_OPTIONS=(-y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold)
+apt-get update
+%{ if update_packages ~}
+apt-get "$${APT_OPTIONS[@]}" upgrade
+%{ endif ~}
+# The CloudFormation helper scripts are not packaged for Ubuntu: install them from AWS into
+# their own Python environment, which Ubuntu 23.04 and later require for pip.
+CFN_BIN=/opt/aws/cfn-bootstrap/bin
+if [ ! -x "$CFN_BIN/cfn-init" ]; then
+  apt-get "$${APT_OPTIONS[@]}" install python3-venv
+  python3 -m venv /opt/aws/cfn-bootstrap
+  /opt/aws/cfn-bootstrap/bin/pip install --quiet https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-py3-latest.tar.gz
+fi
+%{ endif ~}
+
+signal() {
+%{ if signals ~}
+  "$CFN_BIN/cfn-signal" --exit-code "$1" --stack "$STACK" --resource AutoScalingGroup --region "$REGION"
+%{ else ~}
+  : # resource_signals is off: CloudFormation does not wait for a signal.
+%{ endif ~}
+}
+
+# Everything in the launch template's AWS::CloudFormation::Init metadata.
+if ! "$CFN_BIN/cfn-init" -v --stack "$STACK" --resource LaunchTemplate --region "$REGION" --configsets Bootstrap; then
+  signal 1
+  exit 1
+fi
+%{ if length(scripts) > 0 ~}
+
+# The scripts in user_data_scripts, in order.
+install -d -m 700 /var/lib/autoscaling_group-linux
+%{ for i, script in scripts ~}
+echo '${script}' | base64 -d > /var/lib/autoscaling_group-linux/user-data-${i + 1}
+chmod 700 /var/lib/autoscaling_group-linux/user-data-${i + 1}
+if ! /var/lib/autoscaling_group-linux/user-data-${i + 1}; then
+  echo "user_data_scripts[${i}] failed" >&2
+  signal 1
+  exit 1
+fi
+%{ endfor ~}
+%{ endif ~}
+
+signal 0

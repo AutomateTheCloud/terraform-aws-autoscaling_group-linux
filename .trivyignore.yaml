@@ -1,0 +1,29 @@
+# Trivy findings that are deliberate. Each entry says why.
+misconfigurations:
+  - id: AWS-0104
+    paths:
+      - vpc_security_group_egress_rule.tf
+    statement: >-
+      The instances' default outbound rules allow HTTPS and HTTP to any IPv4 address
+      (security_group_egress). At boot, the instances install updates and the
+      CloudFormation, CloudWatch and CodeDeploy helpers, and report to CloudFormation;
+      none of these has a fixed address range, and Ubuntu's package mirrors use HTTP.
+      Without the rules, a deployment with only the required inputs cannot finish its
+      setup. Callers with VPC endpoints and a package mirror can replace them (README,
+      "Network access"). Chosen by David Singer on 2026-10-06.
+  - id: AWS-0054
+    paths:
+      - lb_listener.tf
+    statement: >-
+      The module creates an HTTP listener only when the caller lists one in
+      load_balancer.listeners; with the defaults it creates no load balancer at all.
+      An HTTP listener that redirects to HTTPS, or one on an internal load balancer
+      such as the complete example's, is a deliberate choice. HTTPS listeners need a
+      certificate only the caller can provide.
+  - id: AWS-0178
+    paths:
+      - tests/fixtures/same_run/main.tf
+    statement: >-
+      The test fixture creates a VPC only so that its ID is unknown at plan time.
+      It runs against a mocked provider and is never applied. The module itself
+      creates no VPC.

@@ -1,0 +1,144 @@
+# Copyright 2026 Automate the Cloud Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Format and docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_wrapper: false
+      - name: terraform fmt
+        run: terraform fmt -check -recursive -diff
+      - name: Install terraform-docs
+        env:
+          TFDOCS_VERSION: v0.24.0
+        run: |
+          curl -sSfLO "https://github.com/terraform-docs/terraform-docs/releases/download/${TFDOCS_VERSION}/terraform-docs-${TFDOCS_VERSION}-linux-amd64.tar.gz"
+          curl -sSfLO "https://github.com/terraform-docs/terraform-docs/releases/download/${TFDOCS_VERSION}/terraform-docs-${TFDOCS_VERSION}.sha256sum"
+          grep " terraform-docs-${TFDOCS_VERSION}-linux-amd64.tar.gz\$" "terraform-docs-${TFDOCS_VERSION}.sha256sum" | sha256sum -c -
+          tar -xzf "terraform-docs-${TFDOCS_VERSION}-linux-amd64.tar.gz" terraform-docs
+          sudo install terraform-docs /usr/local/bin/terraform-docs
+      - name: README.md is up to date
+        run: terraform-docs --output-check .
+      - uses: terraform-linters/setup-tflint@6ffdbaa3be476b3431f7275c26966ef32ff60337 # v6.3.2
+        with:
+          tflint_version: v0.64.0
+      - name: TFLint
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          tflint --init
+          tflint --recursive --config "$GITHUB_WORKSPACE/.tflint.hcl"
+      - name: Install Trivy
+        env:
+          TRIVY_VERSION: 0.75.0
+        run: |
+          curl -sSfLO "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          curl -sSfL -o trivy_checksums.txt "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_checksums.txt"
+          grep " trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz\$" trivy_checksums.txt | sha256sum -c -
+          tar -xzf "trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" trivy
+          sudo install trivy /usr/local/bin/trivy
+      - name: Trivy security scan
+        run: >-
+          trivy config --severity MEDIUM,HIGH,CRITICAL --exit-code 1
+          --ignorefile .trivyignore.yaml .
+
+  dco:
+    # Every commit in a pull request must carry a Signed-off-by line for its author,
+    # agreeing to the Developer Certificate of Origin. See CONTRIBUTING.md.
+    name: DCO sign-off
+    # Dependabot's update pull requests are exempt. The pull request's author is set
+    # by GitHub, so it cannot be faked the way a commit's author email can.
+    if: github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Every commit is signed off by its author
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          failed=0
+          for commit in $(git rev-list --no-merges "$BASE_SHA..$HEAD_SHA"); do
+            email=$(git show -s --format='%ae' "$commit")
+            if ! git show -s --format='%(trailers:key=Signed-off-by,valueonly)' "$commit" | grep -qiF "<$email>"; then
+              echo "::error::Commit $(git show -s --format='%h %s' "$commit") has no Signed-off-by line for its author <$email>."
+              failed=1
+            fi
+          done
+          if [ "$failed" -ne 0 ]; then
+            echo "Sign off with 'git commit -s'. To fix existing commits: git rebase --signoff main, then force-push. See CONTRIBUTING.md."
+            exit 1
+          fi
+          echo "Every commit is signed off."
+
+  test:
+    # The oldest supported versions, which versions.tf declares as the minimum, and the newest.
+    name: Test (Terraform ${{ matrix.terraform }}, AWS provider ${{ matrix.aws }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - terraform: 1.9.8
+            aws: 6.0.0
+          - terraform: latest
+            aws: latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ matrix.terraform }}
+          terraform_wrapper: false
+      - name: Pin the oldest AWS provider
+        if: matrix.aws != 'latest'
+        run: |
+          cat > ci_override.tf <<HCL
+          terraform {
+            required_providers {
+              aws = { source = "hashicorp/aws", version = "${{ matrix.aws }}" }
+            }
+          }
+          HCL
+      - name: terraform init
+        run: terraform init -backend=false -input=false
+      - name: terraform validate
+        run: terraform validate
+      # New AWS provider releases deprecate attributes. A warning here would be printed
+      # in every caller's plan, so it fails the build.
+      - name: No validation warnings
+        if: matrix.aws == 'latest'
+        run: |
+          warnings=$(terraform validate -json | jq '.warning_count')
+          if [ "$warnings" != "0" ]; then
+            terraform validate
+            echo "::error::terraform validate reported $warnings warning(s)"
+            exit 1
+          fi
+      - name: terraform test
+        run: terraform test
+      - name: Validate examples
+        if: matrix.aws == 'latest'
+        run: |
+          for example in examples/*/; do
+            echo "::group::$example"
+            terraform -chdir="$example" init -backend=false -input=false
+            terraform -chdir="$example" validate
+            echo "::endgroup::"
+          done
