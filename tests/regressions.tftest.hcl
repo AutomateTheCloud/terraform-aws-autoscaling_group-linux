@@ -164,3 +164,92 @@ run "services_started_and_checked" {
     error_message = "The install is skipped when the agent exists either way."
   }
 }
+
+# On Ubuntu, unattended-upgrades and apt-daily can hold apt's locks at boot, and apt-get fails
+# at once on a held lock. One boot in 71 (seen in AWS) lost both the upgrade and the
+# python3-venv install, so cfn-init never existed and the instance waited in Pending:Wait. Every
+# apt-get waits for the dpkg lock, the boot script waits for the apt jobs first, and a failed
+# step signals failure instead of carrying on.
+run "ubuntu_apt_waits_for_locks" {
+  command = apply
+  variables {
+    os              = "ubuntu24"
+    efs_file_system = { id = "fs-0123456789abcdef0", security_group_id = "sg-0fedcba9876543210", mount_point = "/mnt/shared" }
+    codedeploy      = { application_name = "app", service_role_arn = "arn:aws:iam::111111111111:role/cd" }
+  }
+  assert {
+    condition     = strcontains(local.user_data, "APT_OPTIONS=(-y -o DPkg::Lock::Timeout=600 ")
+    error_message = "The boot script's apt-get options wait for the dpkg lock."
+  }
+  assert {
+    condition = (
+      length([for l in split("\n", local.user_data) : l if can(regex("^\\s*(if ! )?apt-get ", l))]) == 3 &&
+      alltrue([for l in split("\n", local.user_data) : strcontains(l, "apt-get \"$${APT_OPTIONS[@]}\" ") if can(regex("^\\s*(if ! )?apt-get ", l))])
+    )
+    error_message = "Every apt-get in the boot script (update, upgrade, install) uses APT_OPTIONS."
+  }
+  assert {
+    condition = alltrue(flatten([
+      for config in values(local.template.Resources.LaunchTemplate.Metadata["AWS::CloudFormation::Init"]) : [
+        for c in values(try(config.commands, {})) : strcontains(c.command, "apt-get -y -o DPkg::Lock::Timeout=600 ") if strcontains(c.command, "apt-get")
+      ]
+      ])) && !strcontains(jsonencode(local.template.Resources.LaunchTemplate.Metadata), "dpkg -i") && strcontains(
+      local.template.Resources.LaunchTemplate.Metadata["AWS::CloudFormation::Init"].cloudwatch_agent.commands["01_install"].command,
+      "apt-get -y -o DPkg::Lock::Timeout=600 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install /tmp/amazon-cloudwatch-agent.deb"
+    )
+    error_message = "Every install in the setup steps waits for the dpkg lock, the CloudWatch agent's package included."
+  }
+  assert {
+    condition = (
+      strcontains(local.user_data, "systemctl stop \"$${APT_TIMERS[@]}\"") &&
+      strcontains(local.user_data, "trap 'systemctl start \"$${APT_TIMERS[@]}\"' EXIT") &&
+      strcontains(local.user_data, "systemctl show --property=ActiveState --value apt-daily.service apt-daily-upgrade.service")
+    )
+    error_message = "The apt timers are stopped until the script ends, after waiting for a run in progress."
+  }
+  assert {
+    condition = (
+      strcontains(local.user_data, "apt-get \"$${APT_OPTIONS[@]}\" upgrade || fail ") &&
+      strcontains(local.user_data, "apt-get \"$${APT_OPTIONS[@]}\" install python3-venv || fail ") &&
+      strcontains(local.user_data, "python3 -m venv /opt/aws/cfn-bootstrap || fail ") &&
+      strcontains(local.user_data, "aws-cfn-bootstrap-py3-latest.tar.gz || fail ")
+    )
+    error_message = "A failed upgrade or helper install stops the script with a failure signal."
+  }
+}
+
+# The Ubuntu AMI may already have the CloudFormation helper scripts (seen in AWS, in
+# /usr/local/bin). They are linked into /opt/aws/cfn-bootstrap/bin, which the setup steps and
+# cfn-hup.service use, and installed only when the AMI has none.
+run "ubuntu_reuses_ami_cfn_helpers" {
+  command = apply
+  variables {
+    os = "ubuntu22"
+  }
+  assert {
+    condition = (
+      can(regex("(?s)if \\[ ! -x \"\\$CFN_BIN/cfn-init\" \\]; then\\n  AMI_CFN_INIT=\\$\\([^)]*command -v cfn-init\\)\\n  if .*has_cfn_tools .*ln -sfn \"\\$\\{AMI_CFN_INIT%/\\*\\}/\\$tool\" \"\\$CFN_BIN/\\$tool\".*\\n  else\\n.*python3 -m venv", local.user_data)) &&
+      strcontains(local.user_data, "CFN_TOOLS=(cfn-init cfn-signal cfn-hup cfn-get-metadata)") &&
+      strcontains(local.user_data, "systemctl stop cfn-hup.service")
+    )
+    error_message = "Existing helper scripts are linked into CFN_BIN before any install, and the AMI's own cfn-hup is stopped."
+  }
+  assert {
+    condition     = local.cfn_bin == "/opt/aws/cfn-bootstrap/bin" && strcontains(local.user_data, "CFN_BIN=/opt/aws/cfn-bootstrap/bin")
+    error_message = "Ubuntu keeps one path for the helper scripts."
+  }
+}
+
+# Amazon Linux 2023 is not affected: its user data, and so its launch template, must not
+# change with the Ubuntu fix.
+run "al2023_user_data_unchanged" {
+  command = apply
+  assert {
+    condition = (
+      !strcontains(local.user_data, "apt") && !strcontains(local.user_data, "systemctl") && !strcontains(local.user_data, "fail") &&
+      strcontains(local.user_data, "CFN_BIN=/opt/aws/bin\ndnf -y upgrade\n\nsignal() {") &&
+      local.install == "dnf -y install"
+    )
+    error_message = "Amazon Linux 2023 user data has none of the Ubuntu boot steps."
+  }
+}

@@ -14,20 +14,7 @@ CFN_BIN=/opt/aws/bin
 dnf -y upgrade
 %{ endif ~}
 %{ else ~}
-export DEBIAN_FRONTEND=noninteractive
-APT_OPTIONS=(-y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold)
-apt-get update
-%{ if update_packages ~}
-apt-get "$${APT_OPTIONS[@]}" upgrade
-%{ endif ~}
-# The CloudFormation helper scripts are not packaged for Ubuntu: install them from AWS into
-# their own Python environment, which Ubuntu 23.04 and later require for pip.
 CFN_BIN=/opt/aws/cfn-bootstrap/bin
-if [ ! -x "$CFN_BIN/cfn-init" ]; then
-  apt-get "$${APT_OPTIONS[@]}" install python3-venv
-  python3 -m venv /opt/aws/cfn-bootstrap
-  /opt/aws/cfn-bootstrap/bin/pip install --quiet https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-py3-latest.tar.gz
-fi
 %{ endif ~}
 
 signal() {
@@ -37,6 +24,75 @@ signal() {
   : # resource_signals is off: CloudFormation does not wait for a signal.
 %{ endif ~}
 }
+%{ if os != "al2023" ~}
+
+fail() {
+  echo "$1" >&2
+  signal 1
+  exit 1
+}
+
+# Ubuntu runs apt-daily (package lists and downloads) and apt-daily-upgrade
+# (unattended-upgrades) from timers, which can fire at boot. While they run they hold apt's
+# locks, and apt-get fails at once on a lock another process holds. Keep the timers from
+# starting them again until this script ends, and wait up to 10 minutes for a run in
+# progress. DPkg::Lock::Timeout makes apt-get wait for the dpkg lock too, but only for that
+# lock: not for the package lists' or the downloads' lock.
+export DEBIAN_FRONTEND=noninteractive
+APT_OPTIONS=(-y -o DPkg::Lock::Timeout=600 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold)
+APT_TIMERS=()
+for timer in apt-daily.timer apt-daily-upgrade.timer; do
+  if systemctl is-active --quiet "$timer"; then
+    APT_TIMERS+=("$timer")
+  fi
+done
+if [ $${#APT_TIMERS[@]} -gt 0 ]; then
+  systemctl stop "$${APT_TIMERS[@]}"
+  trap 'systemctl start "$${APT_TIMERS[@]}"' EXIT
+fi
+for _ in $(seq 120); do
+  case "$(systemctl show --property=ActiveState --value apt-daily.service apt-daily-upgrade.service)" in
+    *activating*) sleep 5 ;;
+    *) break ;;
+  esac
+done
+if ! apt-get "$${APT_OPTIONS[@]}" update; then
+  echo "apt-get update failed: continuing with the package lists the AMI has" >&2
+fi
+
+# The CloudFormation helper scripts are not packaged for Ubuntu. Use the ones the AMI has, if
+# any, linked into $CFN_BIN, where the rest of the setup runs them from. Otherwise install
+# them from AWS into their own Python environment, which Ubuntu 23.04 and later require for
+# pip. They come before the updates, so that a failed update can send its failure signal.
+CFN_TOOLS=(cfn-init cfn-signal cfn-hup cfn-get-metadata)
+has_cfn_tools() {
+  local tool
+  for tool in "$${CFN_TOOLS[@]}"; do
+    [ -x "$1/$tool" ] || return 1
+  done
+}
+if [ ! -x "$CFN_BIN/cfn-init" ]; then
+  AMI_CFN_INIT=$(PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/aws/bin; command -v cfn-init)
+  if [ -n "$AMI_CFN_INIT" ] && has_cfn_tools "$${AMI_CFN_INIT%/*}"; then
+    mkdir -p "$CFN_BIN"
+    for tool in "$${CFN_TOOLS[@]}"; do
+      ln -sfn "$${AMI_CFN_INIT%/*}/$tool" "$CFN_BIN/$tool"
+    done
+  else
+    apt-get "$${APT_OPTIONS[@]}" install python3-venv || fail "apt-get install python3-venv failed: cannot install the CloudFormation helper scripts"
+    python3 -m venv /opt/aws/cfn-bootstrap || fail "python3 -m venv failed: cannot install the CloudFormation helper scripts"
+    /opt/aws/cfn-bootstrap/bin/pip install --quiet https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-py3-latest.tar.gz || fail "pip install of the CloudFormation helper scripts failed"
+  fi
+fi
+# An AMI that has the helper scripts can also start its own cfn-hup at boot, from an init
+# script, without a configuration. Stop it: cfn-init replaces it with a cfn-hup.service of
+# the same name, which systemd would otherwise consider already started.
+systemctl stop cfn-hup.service 2>/dev/null || true
+%{ if update_packages ~}
+
+apt-get "$${APT_OPTIONS[@]}" upgrade || fail "apt-get upgrade failed: the updates (update_packages) were not installed"
+%{ endif ~}
+%{ endif ~}
 
 # Everything in the launch template's AWS::CloudFormation::Init metadata.
 if ! "$CFN_BIN/cfn-init" -v --stack "$STACK" --resource LaunchTemplate --region "$REGION" --configsets Bootstrap; then

@@ -205,8 +205,8 @@ What happens during `terraform apply` for a new deployment:
 2. **Terraform creates the resources around the instances**: the security groups and their rules, the IAM role and instance profile, the log groups, and, if you asked for them, the load balancer, its target groups and listeners, and the rules for the EFS file system.
 3. **Terraform creates the CloudFormation stack.** CloudFormation creates the launch template, then the Auto Scaling group, which launches `desired_capacity` (or `min_size`) instances across your subnets.
 4. **Each instance boots and runs its user data**, which:
-   1. installs the latest package updates (`update_packages`);
-   2. on Ubuntu, installs the CloudFormation helper scripts, which Amazon Linux already has;
+   1. on Ubuntu, waits for Ubuntu's automatic updates if they are running, then sets up the CloudFormation helper scripts, which Amazon Linux already has;
+   2. installs the latest package updates (`update_packages`);
    3. runs `cfn-init`, which carries out the setup steps in the launch template's metadata, in order: start `cfn-hup`; write `/deploy/instance.dat`; create the swap file; install and start the CloudWatch agent; mount the EFS file system; install and start the CodeDeploy agent;
    4. runs each of your `user_data_scripts`, in order, as root;
    5. sends CloudFormation a success signal, or a failure signal as soon as any step fails.
@@ -220,7 +220,7 @@ What runs at boot, by operating system:
 | Step | Amazon Linux 2023 | Ubuntu 22.04 and 24.04 |
 |---|---|---|
 | Updates (`update_packages`) | `dnf upgrade` | `apt-get upgrade` |
-| CloudFormation helper scripts | Included in the AMI | Installed from Amazon S3 into a Python environment in `/opt/aws/cfn-bootstrap` |
+| CloudFormation helper scripts | Included in the AMI | The AMI's own, if it has them, linked into `/opt/aws/cfn-bootstrap/bin`; otherwise installed from Amazon S3 into a Python environment in `/opt/aws/cfn-bootstrap` |
 | `/deploy/instance.dat` | The `details` names and the Region, as shell variables | The same |
 | Swap file (`swap_size_mb`) | `/var/swapfile` | The same |
 | CloudWatch agent (`cloudwatch_agent`) | From the Amazon Linux repositories, with rsyslog for the log files | From the agent's Amazon S3 bucket in the Region |
@@ -413,6 +413,16 @@ The service role in `codedeploy.service_role_arn` needs `ec2:RunInstances`, `ec2
 
 The module adds a rule to the file system's security group so the instances can reach it on NFS (TCP 2049), and mounts it with encryption in transit. If the file system has a policy, it must allow `elasticfilesystem:ClientMount` and `elasticfilesystem:ClientWrite`, and `elasticfilesystem:ClientRootAccess` for scripts that run as root, such as `user_data_scripts`: without it, EFS treats root as an anonymous user, who cannot write to the file system's top directory. The file system needs a mount target in each Availability Zone of `subnet_ids`.
 
+### Ubuntu's automatic updates
+
+Ubuntu runs `apt-daily` (package lists and downloads) and `apt-daily-upgrade` (`unattended-upgrades`) from systemd timers, which can fire while an instance boots. While they run, they hold apt's locks, and `apt-get` fails at once on a lock another process holds; in AWS, this broke one boot in 71 during a rollout on an Ubuntu 24.04 AMI. So on Ubuntu, the boot commands:
+
+- stop the two timers until the boot commands end, so they do not start the jobs again, and wait up to 10 minutes for a run in progress;
+- run every `apt-get`, theirs and the setup steps', with `-o DPkg::Lock::Timeout=600`, which waits up to 10 minutes for the dpkg lock (only that lock: not the package lists' or the downloads');
+- stop with a failure signal when the updates or the helper scripts' install fail, instead of carrying on without them.
+
+Your `user_data_scripts` run before the timers start again, so these jobs do not start during them either. The timers start again when the boot commands end, and catch up on a run they missed.
+
 ### Size limits
 
 EC2 accepts up to 16 KB of user data, which holds the module's boot commands and your `user_data_scripts`, and CloudFormation accepts a template of up to 51,200 bytes, which holds the user data again, encoded, and the setup. The plan fails with a clear message when either is too large. For a longer setup, have a short script download the rest, such as from Amazon S3.
@@ -428,6 +438,8 @@ EC2 accepts up to 16 KB of user data, which holds the module's boot commands and
 **A script cannot write to the EFS file system: "Permission denied".** The file system's policy does not allow `elasticfilesystem:ClientRootAccess` (see [EFS file systems](https://github.com/AutomateTheCloud/terraform-aws-autoscaling_group-linux#efs-file-systems)).
 
 **Reading a parameter fails with "AccessDeniedException".** Reading a whole path needs the path in `parameter_store.paths`; decrypting with your own key needs the key in `parameter_store.kms_key_arns` and the parameter under one of the paths.
+
+**An Ubuntu instance never reports, and has no `cloud-init` or `cfn-init` log streams.** The boot failed before the CloudWatch agent started. If it failed before the CloudFormation helper scripts were in place, it could not send a failure signal either; with `resource_signals.enabled = false`, a CodeDeploy launch hook then holds the instance in `Pending:Wait`. Connect with Session Manager and read `/var/log/cloud-init-output.log`: the last lines before the boot commands stopped give the reason.
 
 **Session Manager cannot start a session, or the SSM Agent reports no credentials or "AccessDenied".** Check that `iam_role.ssm_managed_instance_core` is on, and that the instance is registered: `aws ssm describe-instance-information --filters Key=InstanceIds,Values=<instance ID>`. If it is registered but sessions fail, the account's Session Manager preferences probably log to S3 or encrypt sessions with a KMS key: name the bucket and key in `session_manager`. The agent's own log is `/var/log/amazon/ssm/amazon-ssm-agent.log`. With IMDSv2 required, an AMI with a very old SSM Agent cannot read its credentials; update the agent, or set `instance_metadata = { http_tokens = "optional" }`.
 

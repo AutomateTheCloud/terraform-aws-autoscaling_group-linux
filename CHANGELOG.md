@@ -4,6 +4,19 @@ All notable changes to this module are listed here. The format follows [Keep a C
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-10-07
+
+### Fixed
+
+- On Ubuntu, a boot could fail when Ubuntu's automatic updates (`unattended-upgrades`, `apt-daily`) held apt's locks: `apt-get` failed at once, the CloudFormation helper scripts were not installed, and the instance never ran its setup or reported. The boot commands now pause those jobs' timers until they end, wait for a run in progress, and run every `apt-get`, including the setup steps' installs, with `DPkg::Lock::Timeout`. The CloudWatch agent's package is installed with `apt-get` instead of `dpkg`, so it waits for the lock too.
+- On Ubuntu, a failed `apt-get upgrade` (`update_packages`) or a failed install of the helper scripts let the boot carry on, so an instance could run without its updates and report success. Both now stop the boot with a failure signal; the helper scripts are set up before the updates, so a failed update can send it.
+- On an AMI that starts its own `cfn-hup` from an init script, `cfn-hup` never ran, so setup changes did not reach running instances. Without a configuration that script fails, but systemd still records `cfn-hup.service` as started, and the module's `systemctl start cfn-hup` then did nothing. The boot commands now stop it before the setup writes the module's `cfn-hup.service`.
+
+### Changed
+
+- On Ubuntu, an AMI's own CloudFormation helper scripts (such as in `/usr/local/bin`) are linked into `/opt/aws/cfn-bootstrap/bin` instead of being installed again.
+- Changing to this version changes the Ubuntu user data and setup steps, which replaces Ubuntu instances in a rolling update. Amazon Linux 2023 instances are not changed.
+
 ## [1.0.0] - 2026-10-07
 
 Initial release.
@@ -23,5 +36,6 @@ Initial release.
 - A `metadata` output with everything the module created.
 - Offline tests, and examples for a basic deployment, a complete one, Network and Classic Load Balancers, Spot Instances, a pinned AMI with rolling updates, and Parameter Store.
 
-[Unreleased]: https://github.com/AutomateTheCloud/terraform-aws-autoscaling_group-linux/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/AutomateTheCloud/terraform-aws-autoscaling_group-linux/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/AutomateTheCloud/terraform-aws-autoscaling_group-linux/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/AutomateTheCloud/terraform-aws-autoscaling_group-linux/releases/tag/v1.0.0
