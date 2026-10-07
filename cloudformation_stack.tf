@@ -28,9 +28,11 @@ locals {
     ),
   ) : k => "${k}='${replace(v, "'", "'\\''")}'" }
 
+  # On Ubuntu, `install` waits up to 10 minutes for the dpkg lock, which unattended-upgrades
+  # can hold.
   is_ubuntu   = var.os != "al2023"
   cfn_bin     = local.is_ubuntu ? "/opt/aws/cfn-bootstrap/bin" : "/opt/aws/bin"
-  install     = local.is_ubuntu ? "DEBIAN_FRONTEND=noninteractive apt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install" : "dnf -y install"
+  install     = local.is_ubuntu ? "DEBIAN_FRONTEND=noninteractive apt-get -y -o DPkg::Lock::Timeout=600 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install" : "dnf -y install"
   s3_endpoint = "s3.${local.aws.region.name}.${data.aws_partition.this.dns_suffix}"
 
   # Starts a service and fails the step unless it is running. An AMI can ship a service as a
@@ -151,7 +153,7 @@ locals {
             "01_install" = {
               command = local.is_ubuntu ? join(" && ", [
                 "curl -fsSL -o /tmp/amazon-cloudwatch-agent.deb https://amazoncloudwatch-agent-${local.aws.region.name}.${local.s3_endpoint}/ubuntu/$(dpkg --print-architecture)/latest/amazon-cloudwatch-agent.deb",
-                "dpkg -i -E /tmp/amazon-cloudwatch-agent.deb",
+                "${local.install} /tmp/amazon-cloudwatch-agent.deb",
                 "rm -f /tmp/amazon-cloudwatch-agent.deb",
               ]) : "${local.install} amazon-cloudwatch-agent"
               test = "! test -x /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl"
